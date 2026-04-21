@@ -1,15 +1,40 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 
+const qualities = ["standard", "high"] as const;
+type Quality = (typeof qualities)[number];
+
 type RefineRequest = {
   title?: unknown;
   description?: unknown;
   instruction?: unknown;
+  quality?: unknown;
 };
 
 type RefineResponse = {
   title: string;
   description: string;
+};
+
+const isQuality = (value: unknown): value is Quality =>
+  typeof value === "string" && qualities.includes(value as Quality);
+
+const getTextModelConfig = (quality: Quality) => {
+  if (quality === "high") {
+    return {
+      model: "gpt-5.4" as const,
+      reasoning: {
+        effort: "medium" as const,
+      },
+    };
+  }
+
+  return {
+    model: "gpt-5.4-mini" as const,
+    reasoning: {
+      effort: "none" as const,
+    },
+  };
 };
 
 const normalizeJsonResponse = (raw: string) => {
@@ -89,6 +114,7 @@ export async function POST(req: Request) {
     const title = typeof body.title === "string" ? body.title.trim() : "";
     const description = typeof body.description === "string" ? body.description.trim() : "";
     const instruction = typeof body.instruction === "string" ? body.instruction.trim() : "";
+    const quality = isQuality(body.quality) ? body.quality : "standard";
 
     if (!title || !description) {
       return NextResponse.json(
@@ -103,7 +129,7 @@ export async function POST(req: Request) {
 
     const client = new OpenAI({ apiKey });
     const response = await client.responses.create({
-      model: "gpt-4.1-mini",
+      ...getTextModelConfig(quality),
       input: [
         {
           role: "user",

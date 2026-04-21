@@ -1,5 +1,7 @@
+import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
+import { prisma } from "@/lib/prisma";
 
 const platforms = ["olx", "vinted", "facebook"] as const;
 type Platform = (typeof platforms)[number];
@@ -8,8 +10,47 @@ type Quality = (typeof qualities)[number];
 
 type VintedExtras = {
   size: string;
-  condition: string;
 };
+
+type AdditionalDetails = {
+  condition: string;
+  originalPrice: string;
+  defectsNotes: string;
+  size: string;
+  model: string;
+  year: string;
+  dimensions: string;
+  includedAccessories: string;
+};
+
+type GeneratedListing = {
+  title: string;
+  description: string;
+  price: string;
+  category: string;
+  brand: string;
+  keySellingPoints: string[];
+  pricing: {
+    currency: string;
+    platform: string;
+    priceRange: {
+      low: number;
+      recommended: number;
+      high: number;
+    };
+    quickSalePrice: number;
+    patientSalePrice: number;
+    confidence: "low" | "medium" | "high";
+    reasoning: string[];
+    notes: string;
+  };
+};
+
+const platformDisplayLabels = {
+  olx: "OLX",
+  vinted: "Vinted",
+  facebook: "Facebook Marketplace",
+} as const;
 
 const olxCategories = [
   "Antyki i Kolekcje",
@@ -56,11 +97,61 @@ const normalizeJsonResponse = (raw: string) => {
   return withoutCodeFence;
 };
 
+const isGeneratedListing = (value: unknown): value is GeneratedListing => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const listing = value as Partial<GeneratedListing>;
+  const pricing = listing.pricing;
+
+  return (
+    typeof listing.title === "string" &&
+    typeof listing.description === "string" &&
+    typeof listing.price === "string" &&
+    typeof listing.category === "string" &&
+    typeof listing.brand === "string" &&
+    Array.isArray(listing.keySellingPoints) &&
+    listing.keySellingPoints.every((point) => typeof point === "string") &&
+    !!pricing &&
+    typeof pricing === "object" &&
+    typeof pricing.currency === "string" &&
+    typeof pricing.platform === "string" &&
+    !!pricing.priceRange &&
+    typeof pricing.priceRange.low === "number" &&
+    typeof pricing.priceRange.recommended === "number" &&
+    typeof pricing.priceRange.high === "number" &&
+    typeof pricing.quickSalePrice === "number" &&
+    typeof pricing.patientSalePrice === "number" &&
+    Array.isArray(pricing.reasoning) &&
+    pricing.reasoning.every((reason) => typeof reason === "string") &&
+    typeof pricing.notes === "string"
+  );
+};
+
 const isPlatform = (value: FormDataEntryValue | null): value is Platform =>
   typeof value === "string" && platforms.includes(value as Platform);
 
 const isQuality = (value: FormDataEntryValue | null): value is Quality =>
   typeof value === "string" && qualities.includes(value as Quality);
+
+const getTextModelConfig = (quality: Quality) => {
+  if (quality === "high") {
+    return {
+      model: "gpt-5.4" as const,
+      reasoning: {
+        effort: "medium" as const,
+      },
+    };
+  }
+
+  return {
+    model: "gpt-5.4-mini" as const,
+    reasoning: {
+      effort: "none" as const,
+    },
+  };
+};
 
 const getFormValue = (formData: FormData, key: string) => {
   const value = formData.get(key);
@@ -132,6 +223,21 @@ Rules:
 ${categoryRule}`;
 };
 
+const buildAdditionalDetailsInstructions = (details: AdditionalDetails) => `Additional item details:
+- Condition: ${details.condition || "not specified"}
+- Original price: ${details.originalPrice || "not specified"}
+- Defects / notes: ${details.defectsNotes || "not specified"}
+- Size: ${details.size || "not specified"}
+- Model: ${details.model || "not specified"}
+- Year: ${details.year || "not specified"}
+- Dimensions: ${details.dimensions || "not specified"}
+- Included accessories: ${details.includedAccessories || "not specified"}
+
+Rules:
+- Prioritize provided details over image inference when they help identify the item, completeness, or pricing.
+- Use these details in both the listing copy and the pricing estimate when relevant.
+- Treat defects, missing parts, and used condition as material pricing factors.`;
+
 const buildOutputRequirements = (categoryRule: string) => `OUTPUT REQUIREMENTS:
 Return ONLY valid JSON in this exact shape:
 
@@ -141,29 +247,151 @@ Return ONLY valid JSON in this exact shape:
   "price": "",
   "category": "",
   "brand": "",
-  "keySellingPoints": []
+  "keySellingPoints": [],
+  "pricing": {
+    "currency": "PLN",
+    "platform": "",
+    "priceRange": {
+      "low": 0,
+      "recommended": 0,
+      "high": 0
+    },
+    "quickSalePrice": 0,
+    "patientSalePrice": 0,
+    "confidence": "low | medium | high",
+    "reasoning": [],
+    "notes": ""
+  }
 }
 
 OUTPUT RULES:
 - Title: one line only
 - Description: structured and readable
-- Price: realistic number or range in PLN
+- Price: must exactly match pricing.priceRange as "low-high PLN" using the same numbers
 - Category: ${categoryRule}
 - Brand: use the provided or detected brand, otherwise return an empty string
 - Key selling points: 3-5 short bullet-like phrases
+- pricing.currency: always "PLN"
+- pricing.platform: match the current platform exactly
+- pricing.reasoning: 3 short practical factors
+- pricing.notes: short practical advice
 - No markdown
 - No extra text outside JSON`;
 
+const buildPricingPrompt = ({
+  platform,
+  productName,
+  brand,
+  category,
+  details,
+}: {
+  platform: Platform;
+  productName: string;
+  brand: string;
+  category: string;
+  details: AdditionalDetails;
+}) => `PRICING INTELLIGENCE INSTRUCTIONS:
+You are a pricing intelligence assistant for resale marketplace listings.
+
+Your job is to estimate a realistic selling price for an item using general market knowledge and common resale pricing patterns.
+
+You do NOT have access to live marketplace data.
+Do NOT pretend to browse, search, or reference real listings.
+Do NOT invent sources.
+Instead, produce a grounded estimate based on item type, brand, condition, demand, and typical resale behavior.
+
+INPUT:
+You may receive:
+- product name and/or image
+- platform (${platformDisplayLabels[platform]})
+- optional details such as brand, condition, size, category, color, material, completeness, and age
+
+Item details for pricing:
+- Product name: ${productName || "not provided"}
+- Platform: ${platformDisplayLabels[platform]}
+- Brand: ${brand || "not specified"}
+- Category: ${category || "not specified"}
+- Size: ${details.size || "not specified"}
+- Condition: ${details.condition || "not specified"}
+- Original price: ${details.originalPrice || "not specified"}
+- Defects / notes: ${details.defectsNotes || "not specified"}
+- Model: ${details.model || "not specified"}
+- Year: ${details.year || "not specified"}
+- Dimensions: ${details.dimensions || "not specified"}
+- Included accessories: ${details.includedAccessories || "not specified"}
+
+TASK:
+
+1. Understand the item
+- Identify what the product most likely is
+- Determine category, brand strength, and buyer demand
+- Assess how condition, completeness, age, and seasonality affect value
+- If the item is unclear, be conservative and say so in the notes
+
+2. Estimate market positioning
+- Infer what similar items typically sell for in the resale market
+- Think in terms of low-end, mid-range, and high-end positioning
+- Decide how wide the price range should be based on certainty
+- Use broad ranges when the item is unusual, unclear, or weakly branded
+
+3. Apply platform behavior
+
+Vinted:
+- usually lower-priced and more competitive
+- buyers expect deals
+- pricing should generally be lean and realistic
+
+OLX:
+- negotiation-heavy
+- sellers often list above target to leave room for offers
+- the starting price may be higher than the amount the seller expects to get
+
+Facebook Marketplace:
+- local and flexible
+- pricing should be fair, simple, and easy to negotiate
+- demand can vary by area and category
+
+4. Generate pricing
+You must estimate:
+- low price = fast-sale price
+- recommended price = best default listing price
+- high price = optimistic listing price before negotiation
+- quick sale price = fastest realistic sale price
+- patient sale price = higher price for a slower sale
+
+PRICING RULES:
+- Use ranges, not fake precision
+- Keep the recommended price within the overall range
+- Keep quick sale at or below the low end when appropriate
+- Keep patient sale at or above the high end when appropriate
+- If confidence is low, widen the range
+- Strong brands, rare items, or high demand justify higher pricing
+- Weak brands, generic items, damage, or missing parts justify lower pricing
+- Condition must materially affect the estimate
+- Avoid unrealistic optimistic pricing
+- Ensure the item could realistically sell at the suggested price
+- Prefer conservative estimates over inflated ones
+
+IMPORTANT:
+- Return realistic pricing, not optimistic pricing
+- Do not claim exact research or specific listings
+- Do not fabricate sources
+- The goal is a price that will actually sell`;
+
 const buildVintedPrompt = ({
+  platform,
   productName,
   brand,
   category,
   vintedExtras,
+  details,
 }: {
+  platform: Platform;
   productName: string;
   brand: string;
   category: string;
   vintedExtras: VintedExtras;
+  details: AdditionalDetails;
 }) => `You are an expert Vinted seller and listing writer.
 
 Your job is to create a high-performing Vinted listing from the provided image and any extra user details.
@@ -177,9 +405,11 @@ ${buildBrandCategoryInstructions({
     "If category is provided, prioritize it. If not, infer a concise Vinted category from the image or return an empty string if unclear.",
 })}
 
+${buildAdditionalDetailsInstructions(details)}
+
 Extra Vinted details:
 - Size: ${vintedExtras.size || "not specified"}
-- Condition: ${vintedExtras.condition || "not specified"}
+- Condition: ${details.condition || "not specified"}
 
 Use the strongest patterns from successful Vinted listings:
 - Titles must be concise, searchable, and natural
@@ -236,6 +466,14 @@ INTERNAL GUIDELINES YOU MUST FOLLOW:
 - Empty fluff
 - Misleading claims about condition or size
 
+${buildPricingPrompt({
+  platform,
+  productName,
+  brand,
+  category,
+  details,
+})}
+
 ${buildOutputRequirements(
   "use the provided or inferred Vinted category, otherwise return an empty string",
 )}
@@ -256,13 +494,17 @@ If the image is not clothing, still keep the same Vinted style:
 - clear item identity`;
 
 const buildOlxPrompt = ({
+  platform,
   productName,
   brand,
   category,
+  details,
 }: {
+  platform: Platform;
   productName: string;
   brand: string;
   category: string;
+  details: AdditionalDetails;
 }) => `You are an expert OLX seller and listing writer.
 
 Your job is to create a high-performing OLX listing from the provided image and any extra user details.
@@ -275,6 +517,8 @@ ${buildBrandCategoryInstructions({
   allowedCategories: olxCategories,
   categoryFallback: "If category is not provided, infer the most suitable OLX category from the image.",
 })}
+
+${buildAdditionalDetailsInstructions(details)}
 
 Use the strongest patterns from successful OLX listings:
 - Titles must be concise, specific, and searchable
@@ -362,6 +606,14 @@ Use category-specific details when relevant:
 - Overly promotional language
 - Typos and sloppy formatting
 
+${buildPricingPrompt({
+  platform,
+  productName,
+  brand,
+  category,
+  details,
+})}
+
 ${buildOutputRequirements(`choose exactly one of: ${olxCategories.join(", ")}`)}
 
 If the item is a vehicle or machine:
@@ -379,13 +631,17 @@ If the item is a collectible:
 If the image shows an item that fits one of the listed OLX categories, adapt the output to that category naturally.`;
 
 const buildFacebookPrompt = ({
+  platform,
   productName,
   brand,
   category,
+  details,
 }: {
+  platform: Platform;
   productName: string;
   brand: string;
   category: string;
+  details: AdditionalDetails;
 }) => `You are an expert Facebook Marketplace seller and listing writer.
 
 Your job is to create a high-performing Facebook Marketplace listing from the provided image and any extra user details.
@@ -399,6 +655,8 @@ ${buildBrandCategoryInstructions({
   categoryFallback:
     "If category is not provided, infer the most suitable Facebook Marketplace category from the image.",
 })}
+
+${buildAdditionalDetailsInstructions(details)}
 
 Use the strongest patterns from successful Facebook Marketplace listings:
 - Titles must be concise, clear, and searchable
@@ -489,6 +747,14 @@ Use category-specific details naturally when relevant:
 - Overly long, rambling text
 - Fake urgency or misleading claims
 
+${buildPricingPrompt({
+  platform,
+  productName,
+  brand,
+  category,
+  details,
+})}
+
 ${buildOutputRequirements(`choose exactly one of: ${facebookCategories.join(", ")}`)}
 
 If the item is a vehicle:
@@ -515,6 +781,7 @@ const buildPrompt = ({
   productName,
   quality,
   vintedExtras,
+  details,
 }: {
   platform: Platform;
   category: string;
@@ -522,6 +789,7 @@ const buildPrompt = ({
   productName: string;
   quality: Quality;
   vintedExtras: VintedExtras;
+  details: AdditionalDetails;
 }) => {
   const qualityInstructions = buildQualityInstructions(quality);
 
@@ -530,26 +798,32 @@ const buildPrompt = ({
       return `${qualityInstructions}
 
 ${buildVintedPrompt({
+        platform,
         productName,
         brand,
         category,
         vintedExtras,
+        details,
       })}`;
     case "olx":
       return `${qualityInstructions}
 
 ${buildOlxPrompt({
+        platform,
         productName,
         brand,
         category,
+        details,
       })}`;
     case "facebook":
       return `${qualityInstructions}
 
 ${buildFacebookPrompt({
+        platform,
         productName,
         brand,
         category,
+        details,
       })}`;
   }
 };
@@ -569,6 +843,7 @@ export async function POST(req: Request) {
     }
 
     const formData = await req.formData();
+    const { userId } = await auth();
     const image = formData.get("image");
     const platformEntry = formData.get("platform");
     const platform = isPlatform(platformEntry) ? platformEntry : "olx";
@@ -577,10 +852,23 @@ export async function POST(req: Request) {
     const category = getFormValue(formData, "category");
     const brand = getFormValue(formData, "brand");
     const productName = getFormValue(formData, "productName");
-    const vintedExtras: VintedExtras = {
-      size: getFormValue(formData, "size"),
+    const details: AdditionalDetails = {
       condition: getFormValue(formData, "condition"),
+      originalPrice: getFormValue(formData, "originalPrice"),
+      defectsNotes: getFormValue(formData, "defectsNotes"),
+      size: getFormValue(formData, "size"),
+      model: getFormValue(formData, "model"),
+      year: getFormValue(formData, "year"),
+      dimensions: getFormValue(formData, "dimensions"),
+      includedAccessories: getFormValue(formData, "includedAccessories"),
     };
+    const vintedExtras: VintedExtras = {
+      size: details.size,
+    };
+
+    if (!userId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     if (!(image instanceof File)) {
       return NextResponse.json(
@@ -605,10 +893,11 @@ export async function POST(req: Request) {
       productName,
       quality,
       vintedExtras,
+      details,
     });
     const client = new OpenAI({ apiKey });
     const response = await client.responses.create({
-      model: "gpt-4.1-mini",
+      ...getTextModelConfig(quality),
       input: [
         {
           role: "user",
@@ -644,7 +933,47 @@ export async function POST(req: Request) {
       );
     }
 
-    return NextResponse.json(parsed);
+    if (!isGeneratedListing(parsed)) {
+      return NextResponse.json(
+        { error: "The AI response did not match the expected listing format." },
+        { status: 500 },
+      );
+    }
+
+    let savedListingId: string | undefined;
+
+    try {
+      const savedListing = await prisma.listing.create({
+        data: {
+          userId,
+          title: parsed.title,
+          description: parsed.description,
+          platform,
+          category: parsed.category || null,
+          brand: parsed.brand || null,
+          keySellingPoints: parsed.keySellingPoints,
+          priceLow: parsed.pricing.priceRange.low,
+          priceRecommended: parsed.pricing.priceRange.recommended,
+          priceHigh: parsed.pricing.priceRange.high,
+          quickSalePrice: parsed.pricing.quickSalePrice,
+          patientSalePrice: parsed.pricing.patientSalePrice,
+          imageUrl,
+        },
+      });
+
+      savedListingId = savedListing.id;
+    } catch (saveError) {
+      console.error("LISTING SAVE ERROR:", saveError);
+    }
+
+    return NextResponse.json(
+      savedListingId
+        ? {
+            ...parsed,
+            savedListingId,
+          }
+        : parsed,
+    );
   } catch (error) {
     console.error("ERROR:", error);
 
