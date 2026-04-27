@@ -1,7 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 
 const platforms = ["olx", "vinted", "facebook"] as const;
 type Platform = (typeof platforms)[number];
@@ -830,6 +830,7 @@ ${buildFacebookPrompt({
 
 export async function POST(req: Request) {
   try {
+    const prisma = getPrisma();
     const apiKey = process.env.OPENAI_API_KEY;
 
     if (!apiKey) {

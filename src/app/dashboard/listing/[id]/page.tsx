@@ -1,7 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 import { SavedListingDetailCard } from "@/components/saved-listing-detail-card";
 
 export default async function ListingPage({
@@ -9,6 +9,7 @@ export default async function ListingPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  const prisma = getPrisma();
   const { userId } = await auth();
 
   if (!userId) {

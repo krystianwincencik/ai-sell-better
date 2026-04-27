@@ -3,7 +3,7 @@ import type { Listing } from "@prisma/client";
 import Image from "next/image";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 
 const formatPlatform = (platform: string) => {
   switch (platform) {
@@ -21,6 +21,7 @@ const formatPlatform = (platform: string) => {
 const formatPrice = (value: number) => `${Math.round(value)} PLN`;
 
 export default async function DashboardPage() {
+  const prisma = getPrisma();
   const { userId } = await auth();
 
   if (!userId) {

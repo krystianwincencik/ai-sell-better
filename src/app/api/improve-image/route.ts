@@ -1,7 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import OpenAI, { toFile } from "openai";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 
 const qualities = ["standard", "high"] as const;
 type Quality = (typeof qualities)[number];
@@ -295,6 +295,7 @@ Non-negotiable rules:
 
 export async function POST(req: Request) {
   try {
+    const prisma = getPrisma();
     const apiKey = process.env.OPENAI_API_KEY;
 
     if (!apiKey) {

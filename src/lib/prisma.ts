@@ -41,17 +41,17 @@ const resolveDatabaseConnectionString = () => {
   return decodedConfig.databaseUrl;
 };
 
-const adapter = new PrismaPg({
-  connectionString: resolveDatabaseConnectionString(),
-});
+export const getPrisma = () => {
+  if (!globalForPrisma.prisma) {
+    const adapter = new PrismaPg({
+      connectionString: resolveDatabaseConnectionString(),
+    });
 
-export const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
-    log: process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"],
-    adapter,
-  });
+    globalForPrisma.prisma = new PrismaClient({
+      log: process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"],
+      adapter,
+    });
+  }
 
-if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.prisma = prisma;
-}
+  return globalForPrisma.prisma;
+};
