@@ -4,6 +4,8 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getPrisma } from "@/lib/prisma";
 
+export const dynamic = "force-dynamic";
+
 type DashboardListing = {
   id: string;
   imageUrl: string;
@@ -35,13 +37,13 @@ const formatPlatform = (platform: string) => {
 const formatPrice = (value: number) => `${Math.round(value)} PLN`;
 
 export default async function DashboardPage() {
-  const prisma = getPrisma();
   const { userId } = await auth();
 
   if (!userId) {
     redirect("/sign-in");
   }
 
+  const prisma = getPrisma();
   const listings: DashboardListing[] = await prisma.listing.findMany({
     where: { userId },
     orderBy: { createdAt: "desc" },

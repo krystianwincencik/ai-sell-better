@@ -4,18 +4,20 @@ import { notFound } from "next/navigation";
 import { getPrisma } from "@/lib/prisma";
 import { SavedListingDetailCard } from "@/components/saved-listing-detail-card";
 
+export const dynamic = "force-dynamic";
+
 export default async function ListingPage({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const prisma = getPrisma();
   const { userId } = await auth();
 
   if (!userId) {
     notFound();
   }
 
+  const prisma = getPrisma();
   const { id } = await params;
   const listing = await prisma.listing.findFirst({
     where: {
