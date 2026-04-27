@@ -1,5 +1,4 @@
 import { auth } from "@clerk/nextjs/server";
-import type { Listing } from "@prisma/client";
 import Image from "next/image";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -28,7 +27,7 @@ export default async function DashboardPage() {
     redirect("/sign-in");
   }
 
-  const listings: Listing[] = await prisma.listing.findMany({
+  const listings = await prisma.listing.findMany({
     where: { userId },
     orderBy: { createdAt: "desc" },
   });
