@@ -4,6 +4,21 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getPrisma } from "@/lib/prisma";
 
+type DashboardListing = {
+  id: string;
+  imageUrl: string;
+  improvedImages: string[];
+  title: string;
+  description: string;
+  platform: string;
+  priceRecommended: number;
+  priceLow: number;
+  priceHigh: number;
+  category: string | null;
+  brand: string | null;
+  createdAt: Date;
+};
+
 const formatPlatform = (platform: string) => {
   switch (platform) {
     case "olx":
@@ -27,9 +42,23 @@ export default async function DashboardPage() {
     redirect("/sign-in");
   }
 
-  const listings = await prisma.listing.findMany({
+  const listings: DashboardListing[] = await prisma.listing.findMany({
     where: { userId },
     orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      imageUrl: true,
+      improvedImages: true,
+      title: true,
+      description: true,
+      platform: true,
+      priceRecommended: true,
+      priceLow: true,
+      priceHigh: true,
+      category: true,
+      brand: true,
+      createdAt: true,
+    },
   });
 
   return (
