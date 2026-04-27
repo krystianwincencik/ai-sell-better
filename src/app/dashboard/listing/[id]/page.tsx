@@ -7,7 +7,7 @@ import { SavedListingDetailCard } from "@/components/saved-listing-detail-card";
 export default async function ListingPage({
   params,
 }: {
-  params: Promise<{ id: string }>;
+  params: { id: string };
 }) {
   const prisma = getPrisma();
   const { userId } = await auth();
@@ -16,7 +16,7 @@ export default async function ListingPage({
     notFound();
   }
 
-  const { id } = await params;
+  const { id } = params;
   const listing = await prisma.listing.findFirst({
     where: {
       id,
